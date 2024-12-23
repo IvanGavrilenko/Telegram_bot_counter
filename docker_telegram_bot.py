@@ -211,9 +211,9 @@ def handle_image(message):
     # На распознанном рисуем и увеличиваем счетчик хорошо распознанного
     for i in range(len(boxes.xywh.tolist())):
       if (boxes.xywh.tolist()[i][2]>0.75*average_roll_size 
-        and boxes.xywh.tolist()[i][2]<2*average_roll_size 
+        and boxes.xywh.tolist()[i][2]<1.7*average_roll_size 
         and boxes.xywh.tolist()[i][3]>0.75*average_roll_size 
-        and boxes.xywh.tolist()[i][3]<2*average_roll_size):
+        and boxes.xywh.tolist()[i][3]<1.7*average_roll_size):
             roll_counter=roll_counter+1
             msg = str(roll_counter)
             draw.ellipse((boxes.xywh.tolist()[i][0]-0.75/2*boxes.xywh.tolist()[i][2],boxes.xywh.tolist()[i][1]-0.75/2*boxes.xywh.tolist()[i][3],
@@ -227,6 +227,9 @@ def handle_image(message):
     photo.save(src[:-4]+"_result.jpg")
 
     result = open(src[:-4]+"_result.jpg", 'rb')
+
+    bot.delete_message(message.chat.id, sent_message.message_id)
+    
     bot.send_photo(message.chat.id, result, caption='Распознано '+str(roll_counter)+' рулончик{}'.format(conv(roll_counter)))
     
     #Удаление файлов
