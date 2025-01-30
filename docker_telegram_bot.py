@@ -12,6 +12,13 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 TIMEOUT_CONNECTION = 5 # Таймаут переподключения
 
+#Учитываем объекты не меньше min_recognized_size от среднего размера
+min_recognized_size = 0.75
+#Учитываем объекты не больше max_recognized_size от среднего размера
+max_recognized_size = 1.6
+#Элипсы распознанного рисуем в size_transform раз меньше чем рамка распознанного в YOLO
+size_transform = 0.75
+
 # Сообщение при старте
 START_MESSAGE = """Отправьте мне изображение, и я посчитаю количество рулончиков на фотографии или отправьте мне выражение, а я посчитаю"""
 # Сообщение поддержки
@@ -152,6 +159,28 @@ def conv(n):
     else:
       s=es[1]
   return s
+  
+# для поиска пересекающихся распознанных объектов
+# ищем пересекающиееся распознанные объекты как расстояние между центрами < расстояние от центра объекта 1 до описывающего эллипса + расстояние
+# от центра объекта 2 до описывающего эллипса по прямой соединяющей 2 элипса
+# Расстояние между 2 точками
+def distance_2_points(x1,y1,x2,y2):
+  distance = ((x1-x2)**2+(y1-y2)**2)**0.5
+  return distance
+
+# на основе https://ru.stackoverflow.com/questions/1303889/Точки-пересечения-эллипса-и-прямой решаем уравнение пересечения эллипса и прямой
+# так как нам нужно просто расстояние то ищем один корень квадратного уравнения - даже если отложим расстояние в другую сторону - не страшно
+# Расстояние между центром элипса с центром (х1, у1) и осями Rx и Ry до точки пересечения (х,у) на точку (х2, у2)
+def distance_ellips(x1,y1,Rx,Ry,x2,y2):
+  a = ((Ry/2)**2)*(x2-x1)**2+((Rx/2)**2)*(y2-y1)**2
+  b = 0
+  c = -(Rx*Ry/4)**2
+  D = b*b - 4*a*c
+  t = (-b+D**0.5)/(2*a)
+  x = x1+t*(x2-x1)
+  y = y1+t*(y2-y1)
+  distance = ((x1-x)**2+(y1-y)**2)**0.5
+  return distance
 
 # Обработчик картинок
 @bot.message_handler(content_types=['photo'])
@@ -159,7 +188,7 @@ def handle_image(message):
     #получаем user_id чтобы можно было сохранять файлы под user_id пользователя
     user_id = message.from_user.id
 
-    sent_message = bot.send_message(message.chat.id, '\U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1')
+    sent_message = bot.send_message(message.chat.id, '\U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1 Получаем фото')
 
     # скачиваем фотографию
     file_info = bot.get_file(message.photo[-1].file_id)
@@ -170,18 +199,18 @@ def handle_image(message):
     with open(src, 'wb') as new_file:
         new_file.write(downloaded_file)
  
-    bot.edit_message_text("\U0001F7E2 \U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1",  chat_id=message.chat.id, message_id=sent_message.message_id)
+    bot.edit_message_text("\U0001F7E2 \U0001F7E1 \U0001F7E1 \U0001F7E1 \U0001F7E1 Загружаем модель распознования",  chat_id=message.chat.id, message_id=sent_message.message_id)
   
     # Загружаем кастомную модель распознования
 #    model = YOLO("yolo11n.pt")
     model = YOLO("/code/model_best.pt")
 
-    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E1 \U0001F7E1 \U0001F7E1',  chat_id=message.chat.id, message_id=sent_message.message_id)
+    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E1 \U0001F7E1 \U0001F7E1 Распознаем объекты',  chat_id=message.chat.id, message_id=sent_message.message_id)
     
     #Скармливаем картинку YOLO
     results = model.predict(src, max_det=500)
 
-    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E1 \U0001F7E1',  chat_id=message.chat.id, message_id=sent_message.message_id)
+    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E1 \U0001F7E1 Проверяем пересечения распознанного',  chat_id=message.chat.id, message_id=sent_message.message_id)
 
 
     # Получаем описывающие рамки распознанного
@@ -194,8 +223,26 @@ def handle_image(message):
 
     # Счетчик хорошо распознанных
     roll_counter=0
+    
+    # из массивов распознования выбираем только запись xywh и переводим ее в список
+    recognized=boxes.xywh.tolist()
+    
+    for i in range(len(recognized)):
+    # добавляем дополнительный столбец для количества пересекающихся элементов
+        recognized[i].append(0)
+    
+    # в дополнительный столбец пишем со сколькими объектами пересекается i-й объект
+    for i in range(len(recognized)-1):
+        for j in range(i+1, len(recognized)):
+        # Расстояние между центрами распознанных объектов
+        central_distance = distance_2_points(recognized[i][0],recognized[i][1],recognized[j][0],recognized[j][1])
+        distance_ellips_1 = distance_ellips(recognized[i][0],recognized[i][1],size_transform*recognized[i][2],size_transform*recognized[i][3],recognized[j][0],recognized[j][1])
+        distance_ellips_2 = distance_ellips(recognized[j][0],recognized[j][1],size_transform*recognized[j][2],size_transform*recognized[j][3],recognized[i][0],recognized[i][1])
+        if central_distance < distance_ellips_1 + distance_ellips_2:
+            recognized[i][4] += 1
+            recognized[j][4] += 1
 
-    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E1',  chat_id=message.chat.id, message_id=sent_message.message_id)
+    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E1 Обводим распознанные объекты',  chat_id=message.chat.id, message_id=sent_message.message_id)
 
     # Скармливаем картинку Pillow чтобы дорисовывать
     photo = Image.open(src)
@@ -209,19 +256,20 @@ def handle_image(message):
     font = ImageFont.truetype("/code/RobotoMono-Regular.ttf", average_roll_size/3)
     
     # На распознанном рисуем и увеличиваем счетчик хорошо распознанного
-    for i in range(len(boxes.xywh.tolist())):
-      if (boxes.xywh.tolist()[i][2]>0.75*average_roll_size 
-        and boxes.xywh.tolist()[i][2]<1.7*average_roll_size 
-        and boxes.xywh.tolist()[i][3]>0.75*average_roll_size 
-        and boxes.xywh.tolist()[i][3]<1.7*average_roll_size):
+    for i in range(len(recognized)):
+      if (recognized[i][4]<2
+        and recognized[i][2]>min_recognized_size*average_roll_size 
+        and recognized[i][2]<max_recognized_size*average_roll_size 
+        and recognized[i][3]>min_recognized_size*average_roll_size 
+        and recognized[i][3]<max_recognized_size*average_roll_size):
             roll_counter=roll_counter+1
             msg = str(roll_counter)
-            draw.ellipse((boxes.xywh.tolist()[i][0]-0.75/2*boxes.xywh.tolist()[i][2],boxes.xywh.tolist()[i][1]-0.75/2*boxes.xywh.tolist()[i][3],
-              boxes.xywh.tolist()[i][0]+0.75/2*boxes.xywh.tolist()[i][2],boxes.xywh.tolist()[i][1]+0.75/2*boxes.xywh.tolist()[i][3]), 
+            draw.ellipse((recognized[i][0]-size_transform/2*recognized[i][2],recognized[i][1]-size_transform/2*recognized[i][3],
+              recognized[i][0]+size_transform/2*recognized[i][2],recognized[i][1]+size_transform/2*recognized[i][3]), 
               fill=(200, 100, 0, 127))
-            draw.text((boxes.xywh.tolist()[i][0],boxes.xywh.tolist()[i][1]), msg, anchor="mm", fill=black, font=font)
+            draw.text((recognized[i][0],recognized[i][1]), msg, anchor="mm", fill=black, font=font)
 
-    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2',  chat_id=message.chat.id, message_id=sent_message.message_id)
+    bot.edit_message_text('\U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2 \U0001F7E2  Пересылаем фото',  chat_id=message.chat.id, message_id=sent_message.message_id)
 
     # Результат сохраняем
     photo.save(src[:-4]+"_result.jpg")
